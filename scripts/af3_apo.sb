@@ -1,0 +1,307 @@
+#!/bin/bash --login
+#SBATCH --job-name=ADK
+#SBATCH --time=02:00:00
+#SBATCH --gpus=1
+#SBATCH --constraint=nal
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=24G
+#SBATCH --output=/mnt/gs21/scratch/garlan70/af3/logs/%x_%A_%a.out
+#SBATCH --error=/mnt/gs21/scratch/garlan70/af3/logs/%x_%A_%a.err
+#SBATCH --array=1
+
+set -euo pipefail
+
+module purge
+
+export AF3_PERSONAL_DIR=/mnt/gs21/scratch/garlan70/af3 # CHANGE ME
+export AF3_RESOURCES_DIR=/mnt/research/woldring_lab/AlphaFold3 # CHANGE ME
+export AF3_SCRATCH_DIR=/mnt/gs21/scratch/garlan70/af3 # CHANGE ME
+
+CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_apo_inputs.csv" # CHANGE ME
+AF3_JSON_TMPLT="${AF3_PERSONAL_DIR}/inputs/af3_apo.json" # CHANGE ME
+
+export AF3_IMAGE="${AF3_RESOURCES_DIR}/image/alphafold3.sif" # CHANGE ME
+export AF3_CODE_DIR="${AF3_RESOURCES_DIR}/code"
+export AF3_INPUT_DIR="${AF3_SCRATCH_DIR}/inputs"
+export AF3_OUTPUT_DIR="${AF3_SCRATCH_DIR}/outputs"
+export AF3_MODEL_PARAMETERS="${AF3_RESOURCES_DIR}/weights"
+export AF3_DATABASES_DIR=/mnt/research/common-data/alphafold/database_3
+
+mkdir -p "${AF3_INPUT_DIR}" "${AF3_OUTPUT_DIR}" "${AF3_SCRATCH_DIR}/logs" "${AF3_SCRATCH_DIR}/tmp"
+
+# Total structures per run is AF3_NUM_SEEDS x AF3_NUM_SAMPLES_PER_SEED
+AF3_NUM_SEEDS="${AF3_NUM_SEEDS:-1}" # CHANGE ME
+AF3_NUM_SAMPLES_PER_SEED="${AF3_NUM_SAMPLES_PER_SEED:-5}" # CHANGE ME
+
+# Sanity checks
+[[ -f "${CSV_PATH}" ]] || { echo "ERROR: CSV not found: ${CSV_PATH}" >&2; exit 1; }
+[[ -f "${AF3_JSON_TMPLT}" ]] || { echo "ERROR: Template JSON not found: ${AF3_JSON_TMPLT}" >&2; exit 1; }
+[[ -f "${AF3_IMAGE}" ]] || { echo "ERROR: AF3 image not found: ${AF3_IMAGE}" >&2; exit 1; }
+[[ -d "${AF3_CODE_DIR}" ]] || { echo "ERROR: AF3 code dir not found: ${AF3_CODE_DIR}" >&2; exit 1; }
+[[ -d "${AF3_MODEL_PARAMETERS}" ]] || { echo "ERROR: Model parameters dir not found: ${AF3_MODEL_PARAMETERS}" >&2; exit 1; }
+[[ -d "${AF3_DATABASES_DIR}" ]] || { echo "ERROR: Databases dir not found: ${AF3_DATABASES_DIR}" >&2; exit 1; }
+
+af3_supports_flag() {
+  local flag="$1"
+  singularity exec "${AF3_IMAGE}" /bin/bash -lc \
+    "python3 /root/af_code/alphafold3/run_alphafold.py --helpshort 2>/dev/null | grep -q -- '${flag}'"
+}
+
+make_json() {
+  local pdbid="$1"
+  local sequence="$2"
+  local out_json="$3"
+  local n_seeds="$4"
+
+  python3 - "${AF3_JSON_TMPLT}" "${out_json}" "${pdbid}" "${sequence}" "${n_seeds}" <<'PY'
+import json
+import sys
+import zlib
+
+tmpl_path, out_path, pdbid, seq, n_seeds = sys.argv[1:]
+n_seeds = int(n_seeds)
+if n_seeds < 1:
+    n_seeds = 1
+
+seq = ''.join(seq.split())
+
+with open(tmpl_path, 'r') as f:
+    data = json.load(f)
+
+data['name'] = pdbid
+
+prot = None
+for item in data.get('sequences', []):
+    if 'protein' in item:
+        prot = item['protein']
+        break
+
+if prot is None:
+    raise RuntimeError("Template JSON has no 'protein' entry under 'sequences'")
+
+prot['sequence'] = seq
+
+max_seed = 2147483647
+base_seed = (zlib.crc32(pdbid.encode('utf-8')) % (max_seed - 1)) + 1
+
+seeds = []
+for i in range(n_seeds):
+    s = (base_seed + i) % max_seed
+    if s == 0:
+        s = 1
+    seeds.append(int(s))
+
+data['modelSeeds'] = seeds
+
+with open(out_path, 'w') as f:
+    json.dump(data, f, indent=2)
+PY
+}
+
+run_af3() {
+  # Optional extra bind (e.g., patched templates.py)
+  # usage: run_af3 [ "--bind host_path:container_path" ]
+  local extra_bind="${1:-}"
+
+  local diffusion_args=()
+  if af3_supports_flag 'num_diffusion_samples'; then
+    diffusion_args+=(--num_diffusion_samples "${AF3_NUM_SAMPLES_PER_SEED}")
+  fi
+
+  set +e
+  if [[ -n "${extra_bind}" ]]; then
+    singularity exec --nv \
+      --bind "${AF3_INPUT_DIR}:/root/af_input" \
+      --bind "${AF3_OUTPUT_DIR}:/root/af_output" \
+      --bind "${AF3_MODEL_PARAMETERS}:/root/models" \
+      --bind "${AF3_DATABASES_DIR}:/root/public_databases" \
+      --bind "${AF3_CODE_DIR}:/root/af_code" \
+      --bind "${AF3_TMP_HOST}:/tmp/local" \
+      --env TMPDIR=/tmp/local \
+      ${extra_bind} \
+      "${AF3_IMAGE}" \
+      python3 /root/af_code/alphafold3/run_alphafold.py \
+        --json_path "/root/af_input/${job_tag}.json" \
+        --model_dir /root/models \
+        --db_dir /root/public_databases \
+        --output_dir "/root/af_output/${job_tag}" \
+        "${diffusion_args[@]}" \
+        ${AF3_FORCE_OUTPUT_DIR:-} \
+        > >(tee -a "${AF3_STDOUT}") \
+        2> >(tee -a "${AF3_STDERR}" >&2)
+  else
+    singularity exec --nv \
+      --bind "${AF3_INPUT_DIR}:/root/af_input" \
+      --bind "${AF3_OUTPUT_DIR}:/root/af_output" \
+      --bind "${AF3_MODEL_PARAMETERS}:/root/models" \
+      --bind "${AF3_DATABASES_DIR}:/root/public_databases" \
+      --bind "${AF3_CODE_DIR}:/root/af_code" \
+      --bind "${AF3_TMP_HOST}:/tmp/local" \
+      --env TMPDIR=/tmp/local \
+      "${AF3_IMAGE}" \
+      python3 /root/af_code/alphafold3/run_alphafold.py \
+        --json_path "/root/af_input/${job_tag}.json" \
+        --model_dir /root/models \
+        --db_dir /root/public_databases \
+        --output_dir "/root/af_output/${job_tag}" \
+        "${diffusion_args[@]}" \
+        ${AF3_FORCE_OUTPUT_DIR:-} \
+        > >(tee -a "${AF3_STDOUT}") \
+        2> >(tee -a "${AF3_STDERR}" >&2)
+  fi
+  local status=$?
+  set -e
+  return "${status}"
+}
+
+make_patched_templates_bind() {
+  # Creates a patched templates.py that skips KeyError hits (e.g., 'AAA')
+  # Echoes a string suitable for passing to run_af3: "--bind hostfile:containerfile"
+  local tmpbase="${SLURM_TMPDIR:-/tmp}"
+  local patch_dir="${tmpbase}/af3_patch_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+  mkdir -p "${patch_dir}"
+
+  local container_tpl='/alphafold3_venv/lib/python3.11/site-packages/alphafold3/data/templates.py'
+  local host_tpl="${patch_dir}/templates.py"
+
+  singularity exec "${AF3_IMAGE}" /bin/bash -lc "cat ${container_tpl}" > "${host_tpl}"
+
+  python3 - "${host_tpl}" <<'PY'
+import sys
+import re
+
+path = sys.argv[1]
+txt = open(path, 'r', encoding='utf-8', errors='replace').read()
+
+if 'AF3_SKIP_KEYERROR_PATCH' in txt:
+    sys.exit(0)
+
+pat = re.compile(r'^(?P<indent>\s*)release_date,\s*sequence,\s*unresolved_res_ids\s*=\s*_parse_hit_metadata\(', re.M)
+m = pat.search(txt)
+if not m:
+    raise SystemExit('Could not find the _parse_hit_metadata assignment to patch in templates.py')
+
+indent = m.group('indent')
+start_line = txt.rfind('\n', 0, m.start()) + 1
+
+open_pos = txt.find('_parse_hit_metadata(', m.start())
+if open_pos < 0:
+    raise SystemExit('Internal error: _parse_hit_metadata( not found')
+
+open_paren = txt.find('(', open_pos)
+depth = 0
+close_pos = None
+i = open_paren
+while i < len(txt):
+    ch = txt[i]
+    if ch == '(':
+        depth += 1
+    elif ch == ')':
+        depth -= 1
+        if depth == 0:
+            close_pos = i
+            break
+    i += 1
+
+if close_pos is None:
+    raise SystemExit('Could not balance parentheses for _parse_hit_metadata(...) call')
+
+seg_end = txt.find('\n', close_pos)
+if seg_end == -1:
+    seg_end = len(txt)
+else:
+    seg_end += 1
+
+segment = txt[start_line:seg_end]
+indented_segment = ''.join('    ' + ln for ln in segment.splitlines(True))
+
+replacement = (
+    f"{indent}# AF3_SKIP_KEYERROR_PATCH: skip template hits that crash parsing (e.g., KeyError 'AAA')\n"
+    f"{indent}try:\n"
+    f"{indented_segment}"
+    f"{indent}except KeyError:\n"
+    f"{indent}    continue\n"
+)
+
+new_txt = txt[:start_line] + replacement + txt[seg_end:]
+open(path, 'w', encoding='utf-8').write(new_txt)
+PY
+
+  echo "--bind ${host_tpl}:${container_tpl}"
+}
+
+# ---- grab this task's row (1-based data row index; header excluded) ----
+row_tsv="$(python3 - "${CSV_PATH}" "${SLURM_ARRAY_TASK_ID}" <<'PY'
+import csv
+import sys
+
+path = sys.argv[1]
+idx = int(sys.argv[2])
+
+with open(path, newline='') as f:
+    r = csv.DictReader(f)
+    need = {'pdb_id', 'sequence'}
+    if not r.fieldnames or (need - set(r.fieldnames)):
+        raise SystemExit(f"CSV must have columns: {sorted(need)}; found: {r.fieldnames}")
+
+    for i, row in enumerate(r, start=1):
+        if i == idx:
+            pdbid = row['pdb_id'].strip()
+            seq = row['sequence'].strip()
+            if not pdbid:
+                raise SystemExit(f'Row {idx}: empty pdb_id')
+            print(f'{pdbid}\t{seq}')
+            break
+    else:
+        raise SystemExit(f'No row {idx} in CSV (data rows only).')
+PY
+)"
+
+IFS=$'\t' read -r pdbid sequence <<< "${row_tsv}"
+
+job_tag="${pdbid}"
+json_host="${AF3_INPUT_DIR}/${job_tag}.json"
+out_host="${AF3_OUTPUT_DIR}/${job_tag}"
+
+mkdir -p "${out_host}"
+
+AF3_TMP_HOST="${AF3_SCRATCH_DIR}/tmp/${pdbid}_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+mkdir -p "${AF3_TMP_HOST}"
+
+expected=$((AF3_NUM_SEEDS * AF3_NUM_SAMPLES_PER_SEED))
+
+have="$(find "${out_host}" -type f -path '*seed-*_sample-*/*_model.cif' -size +0c 2>/dev/null | wc -l | tr -d ' ')"
+have="${have:-0}"
+
+if [[ "${have}" -ge "${expected}" ]]; then
+  echo "==> [task ${SLURM_ARRAY_TASK_ID}] pdb_id=${pdbid} already has ${have}/${expected} sample CIFs; skipping"
+  exit 0
+fi
+
+AF3_FORCE_OUTPUT_DIR=''
+if [[ "${have}" -gt 0 ]]; then
+  AF3_FORCE_OUTPUT_DIR='--force_output_dir=true'
+fi
+
+AF3_STDOUT="${out_host}/af3.stdout.log"
+AF3_STDERR="${out_host}/af3.stderr.log"
+: > "${AF3_STDOUT}"
+: > "${AF3_STDERR}"
+
+echo "==> [task ${SLURM_ARRAY_TASK_ID}] pdb_id=${pdbid}"
+echo "==> writing JSON: ${json_host}"
+make_json "${pdbid}" "${sequence}" "${json_host}" "${AF3_NUM_SEEDS}"
+
+echo "==> running AF3 (expected ${expected} structures) in ${out_host}"
+if run_af3; then
+  exit 0
+fi
+
+if grep -q "KeyError: 'AAA'" "${AF3_STDERR}"; then
+  echo "==> [${pdbid}] Detected KeyError 'AAA' during template parsing. Retrying with patched templates.py."
+  bind_arg="$(make_patched_templates_bind)"
+  run_af3 "${bind_arg}"
+  exit $?
+fi
+
+exit 1

@@ -1,0 +1,182 @@
+#!/bin/bash --login
+#SBATCH --job-name=OATP_seeded_run
+#SBATCH --time=02:00:00
+#SBATCH --gpus=1
+#SBATCH --constraint=nal
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=24G
+#SBATCH --output=/mnt/gs21/scratch/garlan70/af3/logs/%x_%A_%a.out
+#SBATCH --error=/mnt/gs21/scratch/garlan70/af3/logs/%x_%A_%a.err
+#SBATCH --array=1-4
+
+set -euo pipefail
+
+module purge
+
+export AF3_PERSONAL_DIR=/mnt/gs21/scratch/garlan70/af3
+export AF3_RESOURCES_DIR=/mnt/research/woldring_lab/AlphaFold3
+export AF3_SCRATCH_DIR=/mnt/gs21/scratch/garlan70/af3
+
+CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_seeded_apo_inputs.csv"
+AF3_JSON_TMPLT="${AF3_PERSONAL_DIR}/inputs/af3_seeded_apo.json"
+
+export AF3_IMAGE="${AF3_RESOURCES_DIR}/image/alphafold3.sif"
+export AF3_CODE_DIR="${AF3_RESOURCES_DIR}/code"
+export AF3_INPUT_DIR="${AF3_SCRATCH_DIR}/inputs"
+export AF3_OUTPUT_DIR="${AF3_SCRATCH_DIR}/outputs"
+export AF3_MODEL_PARAMETERS="${AF3_RESOURCES_DIR}/weights"
+export AF3_DATABASES_DIR=/mnt/research/common-data/alphafold/database_3
+
+mkdir -p "${AF3_INPUT_DIR}" "${AF3_OUTPUT_DIR}" "${AF3_SCRATCH_DIR}/logs" "${AF3_SCRATCH_DIR}/tmp"
+
+AF3_NUM_SEEDS="${AF3_NUM_SEEDS:-20}"
+AF3_NUM_SAMPLES_PER_SEED="${AF3_NUM_SAMPLES_PER_SEED:-5}"
+
+# ---- sanity checks ----
+[[ -f "${CSV_PATH}" ]] || { echo "ERROR: CSV not found: ${CSV_PATH}" >&2; exit 1; }
+[[ -f "${AF3_JSON_TMPLT}" ]] || { echo "ERROR: Template JSON not found: ${AF3_JSON_TMPLT}" >&2; exit 1; }
+[[ -f "${AF3_IMAGE}" ]] || { echo "ERROR: AF3 image not found: ${AF3_IMAGE}" >&2; exit 1; }
+[[ -d "${AF3_CODE_DIR}" ]] || { echo "ERROR: AF3 code dir not found: ${AF3_CODE_DIR}" >&2; exit 1; }
+[[ -d "${AF3_MODEL_PARAMETERS}" ]] || { echo "ERROR: Model parameters dir not found: ${AF3_MODEL_PARAMETERS}" >&2; exit 1; }
+[[ -d "${AF3_DATABASES_DIR}" ]] || { echo "ERROR: Databases dir not found: ${AF3_DATABASES_DIR}" >&2; exit 1; }
+
+af3_supports_flag() {
+  local flag="$1"
+  singularity exec "${AF3_IMAGE}" /bin/bash -lc \
+    "python3 /root/af_code/alphafold3/run_alphafold.py --helpshort 2>/dev/null | grep -q -- '${flag}'"
+}
+
+# -------- JSON BUILDER --------
+make_json() {
+  local pdbid="$1"
+  local sequence="$2"
+  local template_cif="$3"
+  local out_json="$4"
+  local n_seeds="$5"
+
+  python3 - "${AF3_JSON_TMPLT}" "${out_json}" "${pdbid}" "${sequence}" "${template_cif}" "${n_seeds}" <<'PY'
+import json, sys, zlib
+from pathlib import Path
+
+tmpl_path, out_path, pdbid, seq, template_cif, n_seeds = sys.argv[1:]
+n_seeds = int(n_seeds)
+if n_seeds < 1:
+    n_seeds = 1
+
+seq = ''.join(seq.split()).upper()
+N = len(seq)
+
+mmcif_text = Path(template_cif).read_text()
+
+with open(tmpl_path) as f:
+    data = json.load(f)
+
+data['name'] = pdbid
+
+prot = None
+for item in data.get('sequences', []):
+    if 'protein' in item:
+        prot = item['protein']
+        break
+if prot is None:
+    raise RuntimeError("Template JSON has no 'protein' entry under 'sequences'")
+
+prot['sequence'] = seq
+prot["unpairedMsa"] = ""
+prot["pairedMsa"] = ""
+
+# Ensure templates block exists
+if not prot.get('templates'):
+    prot['templates'] = [{}]
+
+prot['templates'][0]['mmcif'] = mmcif_text
+prot['templates'][0]['queryIndices'] = []
+prot['templates'][0]['templateIndices'] = []
+
+max_seed = 2147483647
+base_seed = (zlib.crc32(pdbid.encode('utf-8')) % (max_seed - 1)) + 1
+
+seeds = []
+for i in range(n_seeds):
+    s = (base_seed + i) % max_seed
+    if s == 0:
+        s = 1
+    seeds.append(int(s))
+
+data['modelSeeds'] = seeds
+
+with open(out_path, 'w') as f:
+    json.dump(data, f, indent=2)
+PY
+}
+
+# -------- GRAB CSV ROW --------
+row_tsv="$(python3 - "${CSV_PATH}" "${SLURM_ARRAY_TASK_ID}" <<'PY'
+import csv, sys
+
+path = sys.argv[1]
+idx = int(sys.argv[2])
+
+with open(path, newline='') as f:
+    r = csv.DictReader(f)
+    need = {'pdb_id', 'sequence', 'template_cif'}
+    if not r.fieldnames or (need - set(r.fieldnames)):
+        raise SystemExit(f"CSV must have columns: {sorted(need)}; found: {r.fieldnames}")
+
+    for i, row in enumerate(r, start=1):
+        if i == idx:
+            pdbid = row['pdb_id'].strip()
+            seq = row['sequence'].strip()
+            tpl = row['template_cif'].strip()
+            if not pdbid:
+                raise SystemExit(f"Row {idx}: empty pdb_id")
+            if not seq:
+                raise SystemExit(f"Row {idx}: empty sequence")
+            if not tpl:
+                raise SystemExit(f"Row {idx}: empty template_cif")
+            print(f"{pdbid}\t{seq}\t{tpl}")
+            break
+    else:
+        raise SystemExit(f"No row {idx} in CSV (data rows only).")
+PY
+)"
+
+IFS=$'\t' read -r pdbid sequence template_cif <<< "${row_tsv}"
+
+[[ -f "${template_cif}" ]] || { echo "ERROR: template_cif not found: ${template_cif}" >&2; exit 1; }
+
+job_tag="${pdbid}"
+json_host="${AF3_INPUT_DIR}/${job_tag}.json"
+out_host="${AF3_OUTPUT_DIR}/${job_tag}"
+
+mkdir -p "${out_host}"
+
+AF3_TMP_HOST="${AF3_SCRATCH_DIR}/tmp/${pdbid}_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+mkdir -p "${AF3_TMP_HOST}"
+
+echo "==> [task ${SLURM_ARRAY_TASK_ID}] pdb_id=${pdbid}"
+echo "==> writing JSON: ${json_host}"
+make_json "${pdbid}" "${sequence}" "${template_cif}" "${json_host}" "${AF3_NUM_SEEDS}"
+
+# ---- diffusion args only if supported ----
+diffusion_args=()
+if af3_supports_flag 'num_diffusion_samples'; then
+  diffusion_args+=(--num_diffusion_samples "${AF3_NUM_SAMPLES_PER_SEED}")
+fi
+
+echo "==> running AF3 in ${out_host}"
+singularity exec --nv \
+  --bind "${AF3_INPUT_DIR}:/root/af_input" \
+  --bind "${AF3_OUTPUT_DIR}:/root/af_output" \
+  --bind "${AF3_MODEL_PARAMETERS}:/root/models" \
+  --bind "${AF3_DATABASES_DIR}:/root/public_databases" \
+  --bind "${AF3_CODE_DIR}:/root/af_code" \
+  --bind "${AF3_TMP_HOST}:/tmp/local" \
+  --env TMPDIR=/tmp/local \
+  "${AF3_IMAGE}" \
+  python3 /root/af_code/alphafold3/run_alphafold.py \
+    --json_path "/root/af_input/${job_tag}.json" \
+    --model_dir /root/models \
+    --db_dir /root/public_databases \
+    --output_dir "/root/af_output/${job_tag}" \
+    "${diffusion_args[@]}"

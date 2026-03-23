@@ -1,0 +1,20 @@
+{
+  "name": "alphafold3",
+  "sequences": [
+    {
+      "protein": {
+        "id": ["A"],
+        "sequence": "sequence_placeholder"
+      }
+    },
+    {
+      "ligand": {
+        "id": ["B"],
+        "smiles": "smiles_placeholder"
+      }
+    }
+  ],
+  "modelSeeds": [1],
+  "dialect": "alphafold3",
+  "version": 1
+}

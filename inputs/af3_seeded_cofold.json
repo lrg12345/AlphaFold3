@@ -1,0 +1,31 @@
+{
+  "name": "alphafold3",
+  "sequences": [
+    {
+      "protein": {
+        "id": ["A"],
+        "sequence": "sequence_placeholder",
+
+        "unpairedMsa": "",
+        "pairedMsa": "",
+
+        "templates": [
+          {
+            "mmcif": "mmcif_placeholder",
+            "queryIndices": [],
+            "templateIndices": []
+          }
+        ]
+      }
+    },
+    {
+      "ligand": {
+        "id": "B",
+        "smiles": "smiles_placeholder"
+      }
+    }
+  ],
+  "modelSeeds": [1],
+  "dialect": "alphafold3",
+  "version": 1
+}
