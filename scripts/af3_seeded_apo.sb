@@ -1,6 +1,6 @@
 #!/bin/bash --login
 #SBATCH --job-name=ADK_seeded_apo
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 #SBATCH --gpus=1
 #SBATCH --constraint=nal
 #SBATCH --cpus-per-task=16
