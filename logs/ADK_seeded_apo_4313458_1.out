@@ -1,0 +1,63 @@
+==> [task 1] pdb_id=ADK
+==> writing JSON: /mnt/gs21/scratch/garlan70/af3/inputs/ADK.json
+==> running AF3 in /mnt/gs21/scratch/garlan70/af3/outputs/ADK
+Running AlphaFold 3. Please note that standard AlphaFold 3 model parameters are
+only available under terms of use provided at
+https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md.
+If you do not agree to these terms and are using AlphaFold 3 derived model
+parameters, cancel execution of AlphaFold 3 inference with CTRL-C, and do not
+use the model parameters.
+Found local devices: [CudaDevice(id=0)]
+Building model from scratch...
+Processing fold inputs.
+Processing fold input #1
+Processing fold input ADK
+Output directory /root/af_output/ADK/adk exists and non-empty, using instead  /root/af_output/ADK/adk_20260325_164952.
+Checking we can load the model parameters...
+Running data pipeline...
+Processing chain A
+Processing chain A took 0.00 seconds
+Output directory: /root/af_output/ADK/adk_20260325_164952
+Writing model input JSON to /root/af_output/ADK/adk_20260325_164952
+Predicting 3D structure for ADK for seed(s) (2063740159, 2063740160, 2063740161, 2063740162, 2063740163)...
+Featurising data for seeds (2063740159, 2063740160, 2063740161, 2063740162, 2063740163)...
+Featurising ADK with rng_seed 2063740159.
+Featurising ADK with rng_seed 2063740159 took 2.37 seconds.
+Featurising ADK with rng_seed 2063740160.
+Featurising ADK with rng_seed 2063740160 took 2.37 seconds.
+Featurising ADK with rng_seed 2063740161.
+Featurising ADK with rng_seed 2063740161 took 2.33 seconds.
+Featurising ADK with rng_seed 2063740162.
+Featurising ADK with rng_seed 2063740162 took 2.37 seconds.
+Featurising ADK with rng_seed 2063740163.
+Featurising ADK with rng_seed 2063740163 took 2.34 seconds.
+Featurising data for seeds (2063740159, 2063740160, 2063740161, 2063740162, 2063740163) took  18.24 seconds.
+Running model inference for seed 2063740159...
+Running model inference for seed 2063740159 took  40.51 seconds.
+Extracting output structures (one per sample) for seed 2063740159...
+Extracting output structures (one per sample) for seed 2063740159 took  0.20 seconds.
+Running model inference and extracting output structures for seed 2063740159 took  40.71 seconds.
+Running model inference for seed 2063740160...
+Running model inference for seed 2063740160 took  7.81 seconds.
+Extracting output structures (one per sample) for seed 2063740160...
+Extracting output structures (one per sample) for seed 2063740160 took  0.18 seconds.
+Running model inference and extracting output structures for seed 2063740160 took  8.00 seconds.
+Running model inference for seed 2063740161...
+Running model inference for seed 2063740161 took  7.81 seconds.
+Extracting output structures (one per sample) for seed 2063740161...
+Extracting output structures (one per sample) for seed 2063740161 took  0.19 seconds.
+Running model inference and extracting output structures for seed 2063740161 took  8.00 seconds.
+Running model inference for seed 2063740162...
+Running model inference for seed 2063740162 took  7.81 seconds.
+Extracting output structures (one per sample) for seed 2063740162...
+Extracting output structures (one per sample) for seed 2063740162 took  0.18 seconds.
+Running model inference and extracting output structures for seed 2063740162 took  8.00 seconds.
+Running model inference for seed 2063740163...
+Running model inference for seed 2063740163 took  7.81 seconds.
+Extracting output structures (one per sample) for seed 2063740163...
+Extracting output structures (one per sample) for seed 2063740163 took  0.18 seconds.
+Running model inference and extracting output structures for seed 2063740163 took  8.00 seconds.
+Running model inference and extracting output structures for seeds (2063740159, 2063740160, 2063740161, 2063740162, 2063740163) took  72.70 seconds.
+Writing outputs for ADK for seed(s) (2063740159, 2063740160, 2063740161, 2063740162, 2063740163)...
+Done processing fold input ADK.
+Done processing 1 fold inputs.

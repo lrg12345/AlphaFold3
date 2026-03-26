@@ -1,261 +1,251 @@
 #!/usr/bin/env python3
-"""
-RMSD Alignment Script — BioPython implementation
-Parses mmCIF files properly, aligns on CA atoms shared between reference
-and model (by sequence position), and computes RMSD via SVD superposition.
 
-Dependencies:
-    pip install biopython
+from __future__ import annotations
 
-Usage:
-    python /mnt/gs21/scratch/garlan70/af3/scripts/rmsd.py
-"""
-
-import os
-import glob
+import argparse
 import csv
-import sys
+from pathlib import Path
+from typing import Dict, List, Tuple
+
 import numpy as np
+from Bio.PDB import MMCIFParser
+from Bio.PDB.Atom import Atom
+from Bio.PDB.Chain import Chain
+from Bio.PDB.Model import Model
+from Bio.PDB.Residue import Residue
+from Bio.SVDSuperimposer import SVDSuperimposer
 
-try:
-    from Bio.PDB import MMCIFParser
-    from Bio.PDB.Superimposer import Superimposer
-    from Bio import pairwise2
-except ImportError:
-    sys.exit(
-        "ERROR: BioPython not found.\n"
-        "Install with:  pip install biopython"
-    )
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+ResidueKey = Tuple[str, int, str]
 
-PAIRS = [
-    {
-        "parent_dir": "/mnt/gs21/scratch/garlan70/af3/outputs/OATP1B1_inward/oatp1b1_inward",
-        "reference":  "/mnt/gs21/scratch/garlan70/af3/inputs/structures/OATP1B1_inward.cif",
-        "label":      "OATP1B1_inward",
-    },
-    {
-        "parent_dir": "/mnt/gs21/scratch/garlan70/af3/outputs/OATP1B1_outward/oatp1b1_outward",
-        "reference":  "/mnt/gs21/scratch/garlan70/af3/inputs/structures/OATP1B1_outward.cif",
-        "label":      "OATP1B1_outward",
-    },
-    {
-        "parent_dir": "/mnt/gs21/scratch/garlan70/af3/outputs/OATP1B3_inward/oatp1b3_inward",
-        "reference":  "/mnt/gs21/scratch/garlan70/af3/inputs/structures/OATP1B3_inward.cif",
-        "label":      "OATP1B3_inward",
-    },
-    {
-        "parent_dir": "/mnt/gs21/scratch/garlan70/af3/outputs/OATP1B3_outward/oatp1b3_outward",
-        "reference":  "/mnt/gs21/scratch/garlan70/af3/inputs/structures/OATP1B3_outward.cif",
-        "label":      "OATP1B3_outward",
-    },
-]
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+def is_standard_protein_residue(res: Residue) -> bool:
+    return res.id[0] == " " and "CA" in res
 
-PARSER = MMCIFParser(QUIET=True)
 
-THREE_TO_ONE = {
-    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
-    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
-    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
-    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
-}
+def residue_key(chain: Chain, res: Residue) -> ResidueKey:
+    _, resseq, icode = res.id
+    return chain.id, int(resseq), str(icode).strip()
 
-def get_ca_atoms(structure):
-    """
-    Return an ordered list of (resseq, resname, CA_atom) for all standard
-    residues with a CA atom, from the first model/chain.
-    Handles structures with a single chain A or picks the longest chain.
-    """
-    model  = structure[0]
-    chains = list(model.get_chains())
 
-    # Pick chain A if present, otherwise the longest chain
-    chain = None
-    for ch in chains:
-        if ch.id == "A":
-            chain = ch
+def load_structure(cif_path: Path, struct_id: str):
+    parser = MMCIFParser(QUIET=True)
+    return parser.get_structure(struct_id, str(cif_path))
+
+
+def get_first_model(structure) -> Model:
+    return next(structure.get_models())
+
+
+def collect_ca_atoms(model: Model, chain_id: str) -> Dict[ResidueKey, Atom]:
+    out: Dict[ResidueKey, Atom] = {}
+    for chain in model:
+        if chain.id != chain_id:
+            continue
+        for res in chain:
+            if not is_standard_protein_residue(res):
+                continue
+            out[residue_key(chain, res)] = res["CA"]
+    return out
+
+
+def matched_atoms(
+    ref_model: Model,
+    mob_model: Model,
+    chain_id: str,
+) -> Tuple[List[ResidueKey], np.ndarray, np.ndarray]:
+    ref_atoms = collect_ca_atoms(ref_model, chain_id)
+    mob_atoms = collect_ca_atoms(mob_model, chain_id)
+
+    keys = sorted(set(ref_atoms) & set(mob_atoms), key=lambda x: (x[1], x[2]))
+    if not keys:
+        raise ValueError("No matched CA residues found")
+
+    ref_xyz = np.array([ref_atoms[k].coord for k in keys], dtype=float)
+    mob_xyz = np.array([mob_atoms[k].coord for k in keys], dtype=float)
+    return keys, ref_xyz, mob_xyz
+
+
+def fit_transform(ref_xyz: np.ndarray, mob_xyz: np.ndarray):
+    sup = SVDSuperimposer()
+    sup.set(ref_xyz, mob_xyz)
+    sup.run()
+    rot, tran = sup.get_rotran()
+    rms = float(sup.get_rms())
+    return rot, tran, rms
+
+
+def apply_transform(xyz: np.ndarray, rot: np.ndarray, tran: np.ndarray) -> np.ndarray:
+    return np.dot(xyz, rot) + tran
+
+
+def per_atom_distances(ref_xyz: np.ndarray, mob_xyz: np.ndarray) -> np.ndarray:
+    return np.sqrt(np.sum((ref_xyz - mob_xyz) ** 2, axis=1))
+
+
+def rmsd(ref_xyz: np.ndarray, mob_xyz: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.sum((ref_xyz - mob_xyz) ** 2, axis=1))))
+
+
+def iterative_prune_fit(
+    ref_xyz: np.ndarray,
+    mob_xyz: np.ndarray,
+    cutoff: float = 2.0,
+    max_cycles: int = 5,
+    min_atoms: int = 20,
+):
+    keep = np.ones(len(ref_xyz), dtype=bool)
+
+    for _ in range(max_cycles):
+        if keep.sum() < max(min_atoms, 3):
             break
-    if chain is None:
-        chain = max(chains, key=lambda c: sum(1 for r in c if "CA" in r))
 
-    ca_list = []
-    for residue in chain:
-        # Skip HETATM records (water, ligands)
-        if residue.id[0] != " ":
-            continue
-        if "CA" not in residue:
-            continue
-        resseq  = residue.id[1]
-        resname = residue.resname.strip()
-        ca_list.append((resseq, resname, residue["CA"]))
+        rot, tran, _ = fit_transform(ref_xyz[keep], mob_xyz[keep])
+        mob_fit_all = apply_transform(mob_xyz, rot, tran)
+        dists = per_atom_distances(ref_xyz, mob_fit_all)
 
-    return ca_list
+        new_keep = dists <= cutoff
+        if new_keep.sum() < max(min_atoms, 3):
+            break
+        if np.array_equal(new_keep, keep):
+            keep = new_keep
+            break
+        keep = new_keep
 
-
-def sequence_from_ca_list(ca_list):
-    """Return one-letter sequence string from CA atom list."""
-    return "".join(THREE_TO_ONE.get(r[1], "X") for r in ca_list)
+    rot, tran, _ = fit_transform(ref_xyz[keep], mob_xyz[keep])
+    mob_fit_all = apply_transform(mob_xyz, rot, tran)
+    final_rms = rmsd(ref_xyz[keep], mob_fit_all[keep])
+    return final_rms, int(keep.sum()), keep
 
 
-def align_sequences_and_get_paired_atoms(ref_ca, mob_ca):
-    """
-    Sequence-align the two CA lists and return paired (ref_atoms, mob_atoms)
-    lists containing only matched, gap-free positions.
-    Uses BioPython pairwise2 global alignment.
-    """
-    ref_seq = sequence_from_ca_list(ref_ca)
-    mob_seq = sequence_from_ca_list(mob_ca)
+def find_models(root: Path) -> List[Path]:
+    return sorted(p for p in root.rglob("model.cif") if p.is_file())
 
-    # Global alignment: match=2, mismatch=-1, gap_open=-5, gap_extend=-0.5
-    alignments = pairwise2.align.globalms(
-        ref_seq, mob_seq,
-        2, -1, -5, -0.5,
-        one_alignment_only=True,
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Compute pruned CA RMSDs for AF3 model.cif files against a reference CIF."
     )
-
-    if not alignments:
-        raise ValueError("Sequence alignment failed — no alignment found.")
-
-    aln_ref, aln_mob = alignments[0].seqA, alignments[0].seqB
-
-    ref_atoms = []
-    mob_atoms = []
-    ref_idx = 0
-    mob_idx = 0
-
-    for r, m in zip(aln_ref, aln_mob):
-        if r != "-" and m != "-":
-            ref_atoms.append(ref_ca[ref_idx][2])
-            mob_atoms.append(mob_ca[mob_idx][2])
-        if r != "-":
-            ref_idx += 1
-        if m != "-":
-            mob_idx += 1
-
-    return ref_atoms, mob_atoms
-
-
-def compute_rmsd(ref_atoms, mob_atoms):
-    """
-    Superpose mob_atoms onto ref_atoms using SVD (Superimposer) and
-    return (rmsd, n_atoms).
-    """
-    sup = Superimposer()
-    sup.set_atoms(ref_atoms, mob_atoms)
-    return round(sup.rms, 4), len(ref_atoms)
-
-
-# ── Main loop ─────────────────────────────────────────────────────────────────
-
-for pair in PAIRS:
-    parent_dir = pair["parent_dir"]
-    ref_path   = pair["reference"]
-    label      = pair["label"]
-
-    print(f"\n{'='*70}")
-    print(f"Processing : {label}")
-    print(f"  Reference : {ref_path}")
-    print(f"  Models in : {parent_dir}")
-    print(f"{'='*70}")
-
-    if not os.path.isfile(ref_path):
-        print(f"  WARNING: Reference not found — skipping.")
-        continue
-
-    model_paths = sorted(
-        glob.glob(os.path.join(parent_dir, "**", "model.cif"), recursive=True)
+    ap.add_argument(
+        "--ref",
+        type=Path,
+        default=Path("/mnt/gs21/scratch/garlan70/af3/inputs/structures/ADK_open.cif"), # CHANGE ME
+        help="Reference CIF path",
     )
+    ap.add_argument(
+        "--root",
+        type=Path,
+        default=Path("/mnt/gs21/scratch/garlan70/af3/outputs/ADK/ADK_ATP_seeded_open"), # CHANGE ME
+        help="Root directory to search recursively for model.cif files",
+    )
+    ap.add_argument("--chain", default="A", help="Protein chain ID")
+    ap.add_argument(
+        "--cutoff",
+        type=float,
+        default=2.0,
+        help="Pruning cutoff in Å after each fit cycle",
+    )
+    ap.add_argument(
+        "--cycles",
+        type=int,
+        default=5,
+        help="Maximum number of prune/refit cycles",
+    )
+    ap.add_argument(
+        "--min-atoms",
+        type=int,
+        default=20,
+        help="Minimum number of CA atoms to retain during pruning",
+    )
+    ap.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        help="Optional CSV output path",
+    )
+    args = ap.parse_args()
+
+    ref_struct = load_structure(args.ref, "ref")
+    ref_model = get_first_model(ref_struct)
+
+    model_paths = find_models(args.root)
     if not model_paths:
-        print(f"  WARNING: No model.cif files found — skipping.")
-        continue
+        raise SystemExit(f"No model.cif files found under {args.root}")
 
-    print(f"  Found {len(model_paths)} model(s)")
+    rows = []
+    failures = []
 
-    # Parse reference once
-    ref_struct = PARSER.get_structure("reference", ref_path)
-    ref_ca     = get_ca_atoms(ref_struct)
-    ref_seq    = sequence_from_ca_list(ref_ca)
-    print(f"  Reference: {len(ref_ca)} CA residues\n")
+    # self-check
+    keys_self, ref_self, mob_self = matched_atoms(ref_model, ref_model, args.chain)
+    self_rms, self_n, _ = iterative_prune_fit(
+        ref_self,
+        mob_self,
+        cutoff=args.cutoff,
+        max_cycles=args.cycles,
+        min_atoms=args.min_atoms,
+    )
+    print(f"[self-check:pruned] matched={self_n}, RMSD={self_rms:.6f} Å")
 
-    results = []
-
-    for model_path in model_paths:
-        sample_name = os.path.basename(os.path.dirname(model_path))
-
+    for path in model_paths:
         try:
-            mob_struct = PARSER.get_structure("mobile", model_path)
-            mob_ca     = get_ca_atoms(mob_struct)
+            mob_struct = load_structure(path, path.stem)
+            mob_model = get_first_model(mob_struct)
 
-            if not mob_ca:
-                raise ValueError("No CA atoms found in mobile structure.")
+            keys, ref_xyz, mob_xyz = matched_atoms(ref_model, mob_model, args.chain)
 
-            ref_atoms, mob_atoms = align_sequences_and_get_paired_atoms(ref_ca, mob_ca)
-
-            if len(ref_atoms) < 10:
-                raise ValueError(
-                    f"Only {len(ref_atoms)} residues could be paired — "
-                    "check sequence similarity."
-                )
-
-            rmsd, n_atoms = compute_rmsd(ref_atoms, mob_atoms)
-
-            print(
-                f"  {sample_name:<48s}"
-                f"RMSD={rmsd:.4f} Å  "
-                f"({n_atoms} paired CA atoms, "
-                f"{len(mob_ca)} total in model)"
+            val, used, _ = iterative_prune_fit(
+                ref_xyz,
+                mob_xyz,
+                cutoff=args.cutoff,
+                max_cycles=args.cycles,
+                min_atoms=args.min_atoms,
             )
 
-            results.append({
-                "sample":          sample_name,
-                "rmsd_A":          rmsd,
-                "n_atoms_paired":  n_atoms,
-                "n_CA_model":      len(mob_ca),
-                "n_CA_reference":  len(ref_ca),
-                "model_path":      model_path,
-            })
-
+            rows.append((str(path), val, len(keys), used))
         except Exception as e:
-            print(f"  ERROR — {sample_name}: {e}")
-            results.append({
-                "sample":         sample_name,
-                "rmsd_A":         "ERROR",
-                "n_atoms_paired": "ERROR",
-                "n_CA_model":     "ERROR",
-                "n_CA_reference": len(ref_ca),
-                "model_path":     model_path,
-            })
+            failures.append((str(path), str(e)))
 
-    # ── Averages ──────────────────────────────────────────────────────────────
-    numeric  = [r["rmsd_A"] for r in results if isinstance(r["rmsd_A"], float)]
-    avg_rmsd = round(sum(numeric) / len(numeric), 4) if numeric else "N/A"
-    n_ok     = len(numeric)
-    print(f"\n  Average RMSD: {avg_rmsd} Å  ({n_ok}/{len(results)} structures)")
+    if not rows:
+        raise SystemExit("All model evaluations failed")
 
-    # ── Write CSV ─────────────────────────────────────────────────────────────
-    csv_path   = os.path.join(parent_dir, f"rmsd_results_{label}.csv")
-    fieldnames = [
-        "sample", "rmsd_A", "n_atoms_paired",
-        "n_CA_model", "n_CA_reference", "model_path",
-    ]
+    rows.sort(key=lambda x: x[1])
+    avg = sum(r[1] for r in rows) / len(rows)
+    lo = rows[0]
+    hi = rows[-1]
 
-    with open(csv_path, "w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(results)
-        writer.writerow({f: "" for f in fieldnames})
-        writer.writerow({
-            "sample":         "AVERAGE",
-            "rmsd_A":         avg_rmsd,
-            "n_atoms_paired": "",
-            "n_CA_model":     "",
-            "n_CA_reference": "",
-            "model_path":     f"{n_ok} structures",
-        })
+    print(f"Reference CIF: {args.ref}")
+    print(f"Search root:    {args.root}")
+    print("Mode:           pruned")
+    print(f"Cutoff:         {args.cutoff} Å")
+    print(f"Cycles:         {args.cycles}")
+    print(f"Matched models: {len(rows)}")
+    print(f"Failures:       {len(failures)}")
+    print()
+    print(f"Average RMSD: {avg:.4f} Å")
+    print(f"Lowest RMSD:  {lo[1]:.4f} Å")
+    print(f"  File:       {lo[0]}")
+    print(f"  Matched CA: {lo[2]}")
+    print(f"  Used CA:    {lo[3]}")
+    print(f"Highest RMSD: {hi[1]:.4f} Å")
+    print(f"  File:       {hi[0]}")
+    print(f"  Matched CA: {hi[2]}")
+    print(f"  Used CA:    {hi[3]}")
 
-    print(f"  CSV written → {csv_path}")
+    if args.csv:
+        args.csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(args.csv, "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["path", "rmsd_angstrom", "matched_ca", "used_ca"])
+            for row in rows:
+                w.writerow([row[0], f"{row[1]:.6f}", row[2], row[3]])
 
-print("\nDone.\n")
+    if failures:
+        print("\nFailures:")
+        for p, msg in failures:
+            print(f"  {p}\n    {msg}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

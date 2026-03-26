@@ -1,6 +1,6 @@
 #!/bin/bash --login
-#SBATCH --job-name=OATP1B3_seeded_cofold
-#SBATCH --time=02:00:00
+#SBATCH --job-name=ADK_seeded_cofold
+#SBATCH --time=00:30:00
 #SBATCH --gpus=1
 #SBATCH --constraint=nal
 #SBATCH --cpus-per-task=16
@@ -18,7 +18,7 @@ export AF3_RESOURCES_DIR=/mnt/research/woldring_lab/AlphaFold3
 export AF3_SCRATCH_DIR=/mnt/gs21/scratch/garlan70/af3
 
 # Docked inputs / templates
-CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_seeded_cofold_inputs.csv"
+CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_seeded_cofold.csv"
 AF3_JSON_TMPLT="${AF3_PERSONAL_DIR}/inputs/af3_seeded_cofold.json"
 
 export AF3_IMAGE="${AF3_RESOURCES_DIR}/image/alphafold3.sif"
