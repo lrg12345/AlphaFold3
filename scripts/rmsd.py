@@ -129,13 +129,13 @@ def main() -> int:
     ap.add_argument(
         "--ref",
         type=Path,
-        default=Path("/mnt/gs21/scratch/garlan70/af3/inputs/structures/ADK_open.cif"), # CHANGE ME
+        default=Path("/mnt/gs21/scratch/garlan70/af3/inputs/structures/ADK_closed.cif"), # CHANGE ME
         help="Reference CIF path",
     )
     ap.add_argument(
         "--root",
         type=Path,
-        default=Path("/mnt/gs21/scratch/garlan70/af3/outputs/ADK/ADK_ATP_seeded_open"), # CHANGE ME
+        default=Path("/mnt/gs21/scratch/garlan70/af3/outputs/ADK/ADK_ATP_seeded_closed"), # CHANGE ME
         help="Root directory to search recursively for model.cif files",
     )
     ap.add_argument("--chain", default="A", help="Protein chain ID")

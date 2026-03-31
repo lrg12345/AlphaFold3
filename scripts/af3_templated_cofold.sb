@@ -1,5 +1,5 @@
 #!/bin/bash --login
-#SBATCH --job-name=ADK_seeded_cofold
+#SBATCH --job-name=AF3_templated_cofold
 #SBATCH --time=01:00:00
 #SBATCH --gpus=1
 #SBATCH --constraint=nal
@@ -13,12 +13,12 @@ set -euo pipefail
 
 module purge
 
-export AF3_PERSONAL_DIR=/mnt/gs21/scratch/garlan70/af3
-export AF3_RESOURCES_DIR=/mnt/research/woldring_lab/AlphaFold3
-export AF3_SCRATCH_DIR=/mnt/gs21/scratch/garlan70/af3
+export AF3_PERSONAL_DIR=/mnt/gs21/scratch/garlan70/af3 # CHANGE ME
+export AF3_RESOURCES_DIR=/mnt/research/woldring_lab/AlphaFold3 # CHANGE ME
+export AF3_SCRATCH_DIR=/mnt/gs21/scratch/garlan70/af3 # CHANGE ME
 
-CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_seeded_cofold.csv"
-AF3_JSON_TMPLT="${AF3_PERSONAL_DIR}/inputs/af3_seeded_cofold.json"
+CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_templated_cofold.csv" # CHANGE ME
+AF3_JSON_TMPLT="${AF3_PERSONAL_DIR}/inputs/af3_templated_cofold.json" # CHANGE ME
 
 export AF3_IMAGE="${AF3_RESOURCES_DIR}/image/alphafold3.sif"
 export AF3_CODE_DIR="${AF3_RESOURCES_DIR}/code"

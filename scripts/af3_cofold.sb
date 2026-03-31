@@ -1,25 +1,24 @@
 #!/bin/bash --login
-#SBATCH --job-name=chimeric_OATP_af3
-#SBATCH --time=02:00:00
+#SBATCH --job-name=AF3_cofold
+#SBATCH --time=01:00:00
 #SBATCH --gpus=1
 #SBATCH --constraint=nal
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=24G
 #SBATCH --output=/mnt/gs21/scratch/garlan70/af3/logs/%x_%A_%a.out
 #SBATCH --error=/mnt/gs21/scratch/garlan70/af3/logs/%x_%A_%a.err
-#SBATCH --array=1-5
+#SBATCH --array=1-1
 
 set -euo pipefail
 
 module purge
-# module load Singularity  # uncomment if needed on your cluster
 
 export AF3_PERSONAL_DIR=/mnt/gs21/scratch/garlan70/af3 # CHANGE ME
 export AF3_RESOURCES_DIR=/mnt/research/woldring_lab/AlphaFold3 # CHANGE ME
 export AF3_SCRATCH_DIR=/mnt/gs21/scratch/garlan70/af3 # CHANGE ME
 
-CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_cofold_inputs.csv"
-AF3_JSON_TMPLT="${AF3_PERSONAL_DIR}/inputs/af3_cofold.json"
+CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_cofold.csv" # CHANGE ME
+AF3_JSON_TMPLT="${AF3_PERSONAL_DIR}/inputs/af3_cofold.json" # CHANGE ME
 
 export AF3_IMAGE="${AF3_RESOURCES_DIR}/image/alphafold3.sif"
 export AF3_CODE_DIR="${AF3_RESOURCES_DIR}/code"
