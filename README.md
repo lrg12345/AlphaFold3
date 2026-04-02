@@ -4,7 +4,7 @@ Basic workflow for running AlphaFold3 via the HPCC. Four different workflows are
 
 * apo
 * cofold
-* seeded_apo
-* seeded_cofold
+* templated_apo
+* templated_cofold
 
-Input csv and json templates are available for all four workflows, along with the respective scripts. Template structures can be used to heavily influence seeded runs. Four example template structures are included in the input directory.
+Input csv and json templates are available for all four workflows, along with the respective scripts. Input structures can be used to heavily influence templated runs. Four example template structures are included in the input directory.
