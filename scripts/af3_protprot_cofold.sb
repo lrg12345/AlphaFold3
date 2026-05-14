@@ -1,24 +1,24 @@
 #!/bin/bash --login
-#SBATCH --job-name=AF3_templated_apo
+#SBATCH --job-name=af3_ProtProt_cofold
 #SBATCH --time=03:00:00
 #SBATCH --gpus=a100:1
 #SBATCH --constraint=nal
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --output=/mnt/gs21/scratch/garlan70/af3/logs/%x_%A_%a.out # CHANGE ME
-#SBATCH --error=/mnt/gs21/scratch/garlan70/af3/logs/%x_%A_%a.err # CHANGE ME
+#SBATCH --output=/mnt/gs21/scratch/needsang/AlphaFold/logs/%x_%A_%a.out # CHANGE ME
+#SBATCH --error=/mnt/gs21/scratch/needsang/AlphaFold/logs/%x_%A_%a.err # CHANGE ME
 #SBATCH --array=1-1 # CHANGE ME
 
 set -euo pipefail
 
 module purge
 
-export AF3_PERSONAL_DIR=/mnt/gs21/scratch/garlan70/af3 # CHANGE ME
+export AF3_PERSONAL_DIR=/mnt/scratch/needsang/AlphaFold/ # CHANGE ME
 export AF3_RESOURCES_DIR=/mnt/research/woldring_lab/AlphaFold3 # CHANGE ME
-export AF3_SCRATCH_DIR=/mnt/gs21/scratch/garlan70/af3 # CHANGE ME
+export AF3_SCRATCH_DIR=/mnt/scratch/needsang/AlphaFold/ # CHANGE ME
 
-CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_templated_apo.csv" # CHANGE ME
-AF3_JSON_TMPLT="${AF3_PERSONAL_DIR}/inputs/af3_templated_apo.json" # CHANGE ME
+CSV_PATH="${AF3_PERSONAL_DIR}/inputs/af3_ProtProt_cofold.csv" # CHANGE ME
+AF3_JSON_TMPLT="${AF3_PERSONAL_DIR}/inputs/af3_ProtProt_template.json" # CHANGE ME
 
 export AF3_IMAGE="${AF3_RESOURCES_DIR}/image/alphafold3.sif"
 export AF3_CODE_DIR="${AF3_RESOURCES_DIR}/code"
@@ -29,6 +29,7 @@ export AF3_DATABASES_DIR=/mnt/research/common-data/alphafold/database_3
 
 mkdir -p "${AF3_INPUT_DIR}" "${AF3_OUTPUT_DIR}" "${AF3_SCRATCH_DIR}/logs" "${AF3_SCRATCH_DIR}/tmp"
 
+# Total structures per run is AF3_NUM_SEEDS x AF3_NUM_SAMPLES_PER_SEED
 AF3_NUM_SEEDS="${AF3_NUM_SEEDS:-5}"
 AF3_NUM_SAMPLES_PER_SEED="${AF3_NUM_SAMPLES_PER_SEED:-5}"
 
@@ -46,62 +47,50 @@ af3_supports_flag() {
     "python3 /root/af_code/alphafold3/run_alphafold.py --helpshort 2>/dev/null | grep -q -- '${flag}'"
 }
 
-# -------- JSON BUILDER --------
+# -------- JSON BUILDER (protein-protein docking) --------
 make_json() {
-  local pdbid="$1"
-  local sequence="$2"
-  local template_cif="$3"
-  local out_json="$4"
-  local n_seeds="$5"
+  local target_id="$1"
+  local target_sequence="$2"
+  local out_json="$3"
+  local n_seeds="$4"
+  local binder_id="$5"
+  local binder_sequence="$6"
 
-  python3 - "${AF3_JSON_TMPLT}" "${out_json}" "${pdbid}" "${sequence}" "${template_cif}" "${n_seeds}" <<'PY'
+  python3 - "${AF3_JSON_TMPLT}" "${out_json}" "${target_id}" "${target_sequence}" "${n_seeds}" "${binder_id}" "${binder_sequence}" <<'PY'
 import json, sys, zlib
-from pathlib import Path
 
-tmpl_path, out_path, pdbid, seq, template_cif, n_seeds = sys.argv[1:]
+tmpl_path, out_path, target_id, target_seq, n_seeds, binder_id, binder_seq = sys.argv[1:]
+
 n_seeds = int(n_seeds)
 if n_seeds < 1:
     n_seeds = 1
 
-seq = ''.join(seq.split()).upper()
-N = len(seq)
+target_seq = ''.join(target_seq.split()).upper()
+binder_seq = ''.join(binder_seq.split()).upper()
 
-mmcif_text = Path(template_cif).read_text()
-
-with open(tmpl_path) as f:
+with open(tmpl_path, 'r') as f:
     data = json.load(f)
 
-data['name'] = pdbid
+data['name'] = f"{target_id}_{binder_id}"
 
-prot = None
-for item in data.get('sequences', []):
-    if 'protein' in item:
-        prot = item['protein']
-        break
-if prot is None:
-    raise RuntimeError("Template JSON has no 'protein' entry under 'sequences'")
+# ---- proteins ----
+protein_entries = [item['protein'] for item in data.get('sequences',[]) if 'protein' in item]
 
-prot['sequence'] = seq
-prot["unpairedMsa"] = ""
-prot["pairedMsa"] = ""
+if len(protein_entries) <2:
+  raise RuntimeError(f"Template JSON needs at least 2 protein entries. Found: {len(protein_entries)}")
 
-# Ensure templates block exists
-if not prot.get('templates'):
-    prot['templates'] = [{}]
+protein_entries[0]['sequence'] = target_seq
+protein_entries[1]['sequence'] = binder_seq
 
-prot['templates'][0]['mmcif'] = mmcif_text
-prot['templates'][0]['queryIndices'] = []
-prot['templates'][0]['templateIndices'] = []
-
+# ---- seeds ----
 max_seed = 2147483647
-base_seed = (zlib.crc32(pdbid.encode('utf-8')) % (max_seed - 1)) + 1
+seed_string = f"{target_id}{binder_id}".encode('utf-8')
+base_seed = (zlib.crc32(seed_string) % (max_seed - 1)) + 1
 
 seeds = []
 for i in range(n_seeds):
     s = (base_seed + i) % max_seed
-    if s == 0:
-        s = 1
-    seeds.append(int(s))
+    seeds.append(int(s if s != 0 else 1))
 
 data['modelSeeds'] = seeds
 
@@ -119,44 +108,46 @@ idx = int(sys.argv[2])
 
 with open(path, newline='') as f:
     r = csv.DictReader(f)
-    need = {'pdb_id', 'sequence', 'template_cif'}
+    need = {'target_id', 'target_sequence','binder_id','binder_sequence'}
     if not r.fieldnames or (need - set(r.fieldnames)):
         raise SystemExit(f"CSV must have columns: {sorted(need)}; found: {r.fieldnames}")
 
     for i, row in enumerate(r, start=1):
         if i == idx:
-            pdbid = row['pdb_id'].strip()
-            seq = row['sequence'].strip()
-            tpl = row['template_cif'].strip()
-            if not pdbid:
-                raise SystemExit(f"Row {idx}: empty pdb_id")
-            if not seq:
-                raise SystemExit(f"Row {idx}: empty sequence")
-            if not tpl:
-                raise SystemExit(f"Row {idx}: empty template_cif")
-            print(f"{pdbid}\t{seq}\t{tpl}")
+            target_id = row['target_id'].strip()
+            target_seq = row['target_sequence'].strip()
+            binder_id = row['binder_id'].strip()
+            binder_seq = row['binder_sequence'].strip()
+            if not target_id:
+                raise SystemExit(f'Row {idx}: empty target_id')
+            if not target_seq:
+                raise SystemExit(f'Row {idx}: empty target_sequence')
+            if not binder_id:
+                raise SystemExit(f'Row {idx}: empty binder_id')
+            if not binder_seq:
+                raise SystemExit(f'Row {idx}: empty binder_sequence')
+            print(f'{target_id}\t{target_seq}\t{binder_id}\t{binder_seq}')
             break
     else:
-        raise SystemExit(f"No row {idx} in CSV (data rows only).")
+        raise SystemExit(f'No row {idx} in CSV (data rows only).')
 PY
 )"
 
-IFS=$'\t' read -r pdbid sequence template_cif <<< "${row_tsv}"
+IFS=$'\t' read -r target_id target_sequence binder_id binder_sequence <<< "${row_tsv}"
 
-[[ -f "${template_cif}" ]] || { echo "ERROR: template_cif not found: ${template_cif}" >&2; exit 1; }
-
-job_tag="${pdbid}"
+job_tag="${target_id}_${binder_id}"
 json_host="${AF3_INPUT_DIR}/${job_tag}.json"
 out_host="${AF3_OUTPUT_DIR}/${job_tag}"
 
 mkdir -p "${out_host}"
 
-AF3_TMP_HOST="${AF3_SCRATCH_DIR}/tmp/${pdbid}_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
+AF3_TMP_HOST="${AF3_SCRATCH_DIR}/tmp/${job_tag}_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}"
 mkdir -p "${AF3_TMP_HOST}"
 
-echo "==> [task ${SLURM_ARRAY_TASK_ID}] pdb_id=${pdbid}"
+echo "==> [task ${SLURM_ARRAY_TASK_ID}] job_tag=${job_tag}"
 echo "==> writing JSON: ${json_host}"
-make_json "${pdbid}" "${sequence}" "${template_cif}" "${json_host}" "${AF3_NUM_SEEDS}"
+
+make_json "${target_id}" "${target_sequence}" "${json_host}" "${AF3_NUM_SEEDS}" "${binder_id}" "${binder_sequence}"
 
 # ---- diffusion args only if supported ----
 diffusion_args=()
