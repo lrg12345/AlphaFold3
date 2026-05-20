@@ -1,4 +1,4 @@
-# AlphaFold 3 HPCC SLURM Workflow
+# AlphaFold3 HPCC SLURM Workflow
 
 ## Overview
 
