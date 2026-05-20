@@ -55,7 +55,10 @@ make_json() {
   local n_seeds="$5"
 
   python3 - "${AF3_JSON_TMPLT}" "${out_json}" "${pdbid}" "${sequence}" "${template_cif}" "${n_seeds}" <<'PY'
-import json, sys, zlib
+import json
+import shlex
+import sys
+import zlib
 from pathlib import Path
 
 tmpl_path, out_path, pdbid, seq, template_cif, n_seeds = sys.argv[1:]
@@ -66,7 +69,315 @@ if n_seeds < 1:
 seq = ''.join(seq.split()).upper()
 N = len(seq)
 
+DEFAULT_MMCIF_DATE = "2020-01-01"
+
+AA3_TO_1 = {
+    "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
+    "GLN": "Q", "GLU": "E", "GLY": "G", "HIS": "H", "ILE": "I",
+    "LEU": "L", "LYS": "K", "MET": "M", "PHE": "F", "PRO": "P",
+    "SER": "S", "THR": "T", "TRP": "W", "TYR": "Y", "VAL": "V",
+    "MSE": "M",
+}
+
+
+def ensure_mmcif_dates(mmcif_text: str, date: str = DEFAULT_MMCIF_DATE) -> str:
+    has_deposition_date = "_pdbx_database_status.recvd_initial_deposition_date" in mmcif_text
+    has_revision_date = "_pdbx_audit_revision_history.revision_date" in mmcif_text
+
+    if has_deposition_date and has_revision_date:
+        return mmcif_text
+
+    lines = mmcif_text.splitlines()
+    added_lines = ["#"]
+
+    if not has_deposition_date:
+        added_lines.append(f"_pdbx_database_status.recvd_initial_deposition_date {date}")
+        added_lines.append("#")
+
+    if not has_revision_date:
+        added_lines.extend([
+            "loop_",
+            "_pdbx_audit_revision_history.revision_date",
+            date,
+            "#",
+        ])
+
+    for i, line in enumerate(lines):
+        if line.startswith("data_"):
+            new_lines = lines[:i + 1] + added_lines + lines[i + 1:]
+            return "\n".join(new_lines) + "\n"
+
+    return f"data_{pdbid}\n" + "\n".join(added_lines) + "\n" + mmcif_text
+
+
+def tokenize_cif_line(line: str):
+    return shlex.split(line, posix=False)
+
+
+def extract_template_residues_from_mmcif(mmcif_text: str):
+    """
+    Extract polymer residues actually present in the mmCIF atom_site table.
+
+    Returns residues in coordinate order. Each residue is a dict with:
+      - aa: one-letter amino acid
+      - comp_id: three-letter residue name
+      - label_seq_id: mmCIF label_seq_id, if present
+      - chain: label_asym_id or auth_asym_id
+    """
+
+    lines = mmcif_text.splitlines()
+    residues = []
+    seen = set()
+
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() != "loop_":
+            i += 1
+            continue
+
+        j = i + 1
+        tags = []
+        while j < len(lines) and lines[j].strip().startswith("_"):
+            tags.append(lines[j].strip())
+            j += 1
+
+        if not tags or not any(tag.startswith("_atom_site.") for tag in tags):
+            i = j
+            continue
+
+        tag_to_idx = {tag: k for k, tag in enumerate(tags)}
+
+        required = [
+            "_atom_site.group_PDB",
+            "_atom_site.label_comp_id",
+            "_atom_site.label_seq_id",
+        ]
+
+        if not all(tag in tag_to_idx for tag in required):
+            i = j
+            continue
+
+        group_idx = tag_to_idx["_atom_site.group_PDB"]
+        comp_idx = tag_to_idx["_atom_site.label_comp_id"]
+        seq_idx = tag_to_idx["_atom_site.label_seq_id"]
+
+        chain_idx = None
+        if "_atom_site.label_asym_id" in tag_to_idx:
+            chain_idx = tag_to_idx["_atom_site.label_asym_id"]
+        elif "_atom_site.auth_asym_id" in tag_to_idx:
+            chain_idx = tag_to_idx["_atom_site.auth_asym_id"]
+
+        ins_idx = tag_to_idx.get("_atom_site.pdbx_PDB_ins_code")
+
+        while j < len(lines):
+            raw = lines[j]
+            stripped = raw.strip()
+
+            if (
+                not stripped
+                or stripped == "#"
+                or stripped == "loop_"
+                or stripped.startswith("_")
+                or stripped.startswith("data_")
+            ):
+                break
+
+            parts = tokenize_cif_line(stripped)
+            if len(parts) < len(tags):
+                j += 1
+                continue
+
+            group = parts[group_idx]
+            comp_id = parts[comp_idx].upper()
+            label_seq_id = parts[seq_idx]
+            chain = parts[chain_idx] if chain_idx is not None else "A"
+            ins_code = parts[ins_idx] if ins_idx is not None else "?"
+
+            if group != "ATOM":
+                j += 1
+                continue
+
+            if comp_id not in AA3_TO_1:
+                j += 1
+                continue
+
+            if label_seq_id in {".", "?"}:
+                j += 1
+                continue
+
+            residue_key = (chain, label_seq_id, ins_code, comp_id)
+            if residue_key not in seen:
+                seen.add(residue_key)
+                residues.append({
+                    "aa": AA3_TO_1[comp_id],
+                    "comp_id": comp_id,
+                    "label_seq_id": label_seq_id,
+                    "chain": chain,
+                })
+
+            j += 1
+
+        i = j
+
+    return residues
+
+
+def global_align_template_to_query(query_seq: str, template_seq: str):
+    """
+    Simple Needleman-Wunsch alignment fallback.
+
+    Returns query indices for each template residue index.
+    Allows mismatches, because the template can be homologous rather than identical.
+    """
+
+    m = len(query_seq)
+    n = len(template_seq)
+
+    match_score = 2
+    mismatch_score = -1
+    gap_score = -2
+
+    score = [[0] * (n + 1) for _ in range(m + 1)]
+    trace = [[None] * (n + 1) for _ in range(m + 1)]
+
+    for i in range(1, m + 1):
+        score[i][0] = i * gap_score
+        trace[i][0] = "up"
+
+    for j in range(1, n + 1):
+        score[0][j] = j * gap_score
+        trace[0][j] = "left"
+
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            diag = score[i - 1][j - 1] + (
+                match_score if query_seq[i - 1] == template_seq[j - 1] else mismatch_score
+            )
+            up = score[i - 1][j] + gap_score
+            left = score[i][j - 1] + gap_score
+
+            best = max(diag, up, left)
+            score[i][j] = best
+
+            if best == diag:
+                trace[i][j] = "diag"
+            elif best == up:
+                trace[i][j] = "up"
+            else:
+                trace[i][j] = "left"
+
+    query_indices_rev = []
+    template_indices_rev = []
+
+    i = m
+    j = n
+    while i > 0 or j > 0:
+        direction = trace[i][j]
+
+        if direction == "diag":
+            query_indices_rev.append(i - 1)
+            template_indices_rev.append(j - 1)
+            i -= 1
+            j -= 1
+        elif direction == "up":
+            i -= 1
+        elif direction == "left":
+            j -= 1
+        else:
+            break
+
+    query_indices = list(reversed(query_indices_rev))
+    template_indices = list(reversed(template_indices_rev))
+
+    return query_indices, template_indices
+
+
+def build_template_index_mapping(mmcif_text: str, query_seq: str):
+    residues = extract_template_residues_from_mmcif(mmcif_text)
+
+    if not residues:
+        raise RuntimeError(
+            "Could not extract any protein residues from template mmCIF atom_site records."
+        )
+
+    template_seq = "".join(r["aa"] for r in residues)
+
+    # First try using label_seq_id. This is the best option when the CIF
+    # numbering preserves the original sequence numbering and missing residues
+    # show up as skipped residue numbers.
+    query_indices = []
+    template_indices = []
+    numbering_usable = True
+
+    for template_idx, residue in enumerate(residues):
+        try:
+            query_idx = int(residue["label_seq_id"]) - 1
+        except ValueError:
+            numbering_usable = False
+            break
+
+        if query_idx < 0 or query_idx >= len(query_seq):
+            numbering_usable = False
+            break
+
+        query_indices.append(query_idx)
+        template_indices.append(template_idx)
+
+    if numbering_usable:
+        matches = 0
+        compared = 0
+        for qi, ti in zip(query_indices, template_indices):
+            compared += 1
+            if query_seq[qi] == residues[ti]["aa"]:
+                matches += 1
+
+        match_fraction = matches / compared if compared else 0.0
+
+        if match_fraction < 0.70:
+            print(
+                f"WARNING: Template residue numbering was in range, but sequence agreement was low "
+                f"({matches}/{compared} = {match_fraction:.1%}). Falling back to sequence alignment.",
+                file=sys.stderr,
+            )
+        else:
+            missing_count = len(query_seq) - len(query_indices)
+            print(
+                f"Template mapping for {pdbid}: used mmCIF label_seq_id numbering. "
+                f"Mapped {len(query_indices)} template residues to query length {len(query_seq)}. "
+                f"Apparent missing/unmapped query residues: {missing_count}. "
+                f"Sequence agreement at mapped positions: {matches}/{compared} = {match_fraction:.1%}.",
+                file=sys.stderr,
+            )
+            return query_indices, template_indices
+
+    # Fallback: align observed template residue sequence to query sequence.
+    query_indices, template_indices = global_align_template_to_query(query_seq, template_seq)
+
+    if not query_indices or not template_indices:
+        raise RuntimeError("Could not build a template-to-query residue mapping.")
+
+    matches = sum(
+        1 for qi, ti in zip(query_indices, template_indices)
+        if query_seq[qi] == template_seq[ti]
+    )
+    compared = len(query_indices)
+    match_fraction = matches / compared if compared else 0.0
+
+    print(
+        f"Template mapping for {pdbid}: used sequence-alignment fallback. "
+        f"Mapped {len(query_indices)} template residues to query length {len(query_seq)}. "
+        f"Template residues present in CIF: {len(template_seq)}. "
+        f"Sequence agreement at aligned positions: {matches}/{compared} = {match_fraction:.1%}.",
+        file=sys.stderr,
+    )
+
+    return query_indices, template_indices
+
+
 mmcif_text = Path(template_cif).read_text()
+mmcif_text = ensure_mmcif_dates(mmcif_text)
+
+query_indices, template_indices = build_template_index_mapping(mmcif_text, seq)
 
 with open(tmpl_path) as f:
     data = json.load(f)
@@ -85,13 +396,12 @@ prot['sequence'] = seq
 prot["unpairedMsa"] = ""
 prot["pairedMsa"] = ""
 
-# Ensure templates block exists
 if not prot.get('templates'):
     prot['templates'] = [{}]
 
 prot['templates'][0]['mmcif'] = mmcif_text
-prot['templates'][0]['queryIndices'] = []
-prot['templates'][0]['templateIndices'] = []
+prot['templates'][0]['queryIndices'] = query_indices
+prot['templates'][0]['templateIndices'] = template_indices
 
 max_seed = 2147483647
 base_seed = (zlib.crc32(pdbid.encode('utf-8')) % (max_seed - 1)) + 1
@@ -155,6 +465,7 @@ AF3_TMP_HOST="${AF3_SCRATCH_DIR}/tmp/${pdbid}_${SLURM_JOB_ID}_${SLURM_ARRAY_TASK
 mkdir -p "${AF3_TMP_HOST}"
 
 echo "==> [task ${SLURM_ARRAY_TASK_ID}] pdb_id=${pdbid}"
+echo "==> template CIF: ${template_cif}"
 echo "==> writing JSON: ${json_host}"
 make_json "${pdbid}" "${sequence}" "${template_cif}" "${json_host}" "${AF3_NUM_SEEDS}"
 
